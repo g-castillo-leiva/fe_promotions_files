@@ -163,7 +163,7 @@ jobs:
           aws_secret_key             = "$AWS_SECRET_ACCESS_KEY"
           consul_token               = "$CONSUL_HTTP_TOKEN"
           consul_address             = "consul.smu-labs.cl"
-          consul_project_path        = "comercial/infrastructure/fargate/be_portal_promocional/${{ env.ENV }}"
+          consul_project_path        = "comercial/infrastructure/fargate/gestor_documental/${{ env.ENV }}"
           consul_infra_path          = "comercial/infrastructure/fargate/promociones/${{ env.ENV }}"
           consul_base_path           = "comercial"
           container_definition_image = "$IMAGE_NAME"
