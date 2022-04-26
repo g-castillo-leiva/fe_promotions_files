@@ -7,7 +7,7 @@ from promotional_files.config import ProductionConfig,DevelopmentConfig
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 
-from flask import Flask, url_for
+from flask import Flask
 
 app = Flask(__name__)
 
@@ -20,7 +20,7 @@ def create_app(script_info=None):
   Api(app)
 
 
-  app.register_blueprint(resource_bp)
+  app.register_blueprint(resource_bp, url_prefix='/documents')
     # set config
     #app_settings = os.getenv("APP_SETTINGS")
     #app.config.from_object(app_settings)

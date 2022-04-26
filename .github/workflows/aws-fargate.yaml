@@ -1,0 +1,246 @@
+on:
+  push:
+    branches: [develop,staging,master]
+
+name: Deploy to Amazon ECS
+
+jobs:
+  #Trufflehog:
+  #  runs-on: ubuntu-latest
+  #  steps:
+  #    - uses: actions/checkout@v2
+  #    - uses: UnicornGlobal/trufflehog-actions-scan@master
+  #      with:
+  #        branch: ${{ github.head_ref }}
+
+  Checkov:
+    runs-on: ubuntu-latest
+    name: Checkov
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@master
+
+      - name: Run Checkov action
+        id: checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: .
+          quiet: true
+          soft_fail: true
+          framework: terraform
+          output_format: json
+
+  Deploy-Develop:
+    name: Deploy-Develop
+    env:
+      IMAGE_NAME: ${{ github.repository }}:${{ github.sha }}
+    runs-on: ubuntu-latest
+    #needs: [Trufflehog,Checkov]
+    needs: [Checkov]
+    if: github.ref == 'refs/heads/develop'
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build the container image
+        run: docker build . -t $IMAGE_NAME
+      - name: Prisma Cloud image scan
+        id: scan
+        uses: PaloAltoNetworks/prisma-cloud-scan@v1
+        with:
+          pcc_console_url: ${{ secrets.PCC_CONSOLE_URL }}
+          pcc_user: ${{ secrets.PCC_USER }}
+          pcc_pass: ${{ secrets.PCC_PASS }}
+          image_name: ${{ env.IMAGE_NAME }}
+
+      - uses: smu-chile/aws-ecr-policy-action@master
+        with:
+          access_key_id: ${{ secrets.AWS_ECR_ACCESS_KEY_COMERCIAL }}
+          secret_access_key: ${{ secrets.AWS_ECR_SECRET_KEY_COMERCIAL }}
+          ecr_registry: ${{ secrets.AWS_ECR_REGISTRY_COMERCIAL }}
+          repo: ${{ github.repository }}
+          region: us-east-1
+          tags: dev-${{ github.run_number }}
+          ecr_policies: "dev:5 stg:5 prod:5"
+
+  Deploy-Staging:
+    name: Deploy-Staging
+    env:
+      IMAGE_NAME: ${{ github.repository }}:${{ github.sha }}
+    runs-on: ubuntu-latest
+     #needs: [Trufflehog,Checkov]
+    needs: [Checkov]
+    if: github.ref == 'refs/heads/staging'
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build the container image
+        run: docker build -t $IMAGE_NAME .
+
+      - name: Prisma Cloud image scan
+        id: scan
+        uses: PaloAltoNetworks/prisma-cloud-scan@v1
+        with:
+          pcc_console_url: ${{ secrets.PCC_CONSOLE_URL }}
+          pcc_user: ${{ secrets.PCC_USER }}
+          pcc_pass: ${{ secrets.PCC_PASS }}
+          image_name: ${{ env.IMAGE_NAME }}
+
+      - uses: smu-chile/aws-ecr-policy-action@master
+        with:
+          access_key_id: ${{ secrets.AWS_ECR_ACCESS_KEY_COMERCIAL }}
+          secret_access_key: ${{ secrets.AWS_ECR_SECRET_KEY_COMERCIAL }}
+          ecr_registry: ${{ secrets.AWS_ECR_REGISTRY_COMERCIAL }}
+          repo: ${{ github.repository }}
+          region: us-east-1
+          tags: stg-${{ github.run_number }}
+          ecr_policies: "dev:5 stg:5 prod:5"
+
+  Deploy-Prod:
+    name: Deploy-Prod
+    env:
+      IMAGE_NAME: ${{ github.repository }}:${{ github.sha }}
+    runs-on: ubuntu-latest
+    #needs: [Trufflehog,Checkov]
+    needs: [Checkov]
+    if: github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v2
+      - name: Build the container image
+        run: docker build -t $IMAGE_NAME .
+
+      - name: Prisma Cloud image scan
+        id: scan
+        uses: PaloAltoNetworks/prisma-cloud-scan@v1
+        with:
+          pcc_console_url: ${{ secrets.PCC_CONSOLE_URL }}
+          pcc_user: ${{ secrets.PCC_USER }}
+          pcc_pass: ${{ secrets.PCC_PASS }}
+          image_name: ${{ env.IMAGE_NAME }}
+
+      - uses: smu-chile/aws-ecr-policy-action@master
+        with:
+          access_key_id: ${{ secrets.AWS_ECR_ACCESS_KEY_COMERCIAL }}
+          secret_access_key: ${{ secrets.AWS_ECR_SECRET_KEY_COMERCIAL }}
+          ecr_registry: ${{ secrets.AWS_ECR_REGISTRY_COMERCIAL }}
+          repo: ${{ github.repository }}
+          region: us-east-1
+          tags: prod-${{ github.run_number }}
+          ecr_policies: "dev:5 stg:5 prod:5"
+
+  Terraform:
+    name: "Terraform Deployment"
+    runs-on: ubuntu-latest
+    needs: [ Deploy-Develop, Deploy-Staging, Deploy-Prod ]
+    if: ${{ always() && contains(needs.*.result, 'success')}}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: setup ENV
+        shell: bash
+        run: |-
+          if [ ${{ github.event_name }} = "pull_request" ]; then
+            branch=$(echo ${{ github.base_ref }}  | tr / -)
+          else
+            branch=$(echo ${GITHUB_REF#refs/heads/} | tr / -)
+          fi
+          if [ $branch = "master" ]; then
+            env="prod"
+            docker_image="prod-${{ github.run_number }}"
+          elif [ $branch = "develop" ]; then
+            env="develop"
+            docker_image="dev-${{ github.run_number }}"
+          elif [ $branch = "staging" ]; then
+            env="staging"
+            docker_image="stg-${{ github.run_number }}"
+          else
+            echo "invalid environment"; exit -1
+          fi
+          echo "ENV=$(echo $env)" >> $GITHUB_ENV
+          echo "DOCKER_IMAGE=$(echo $docker_image)" >> $GITHUB_ENV
+      - name: Setup Terraform variables
+        id: vars
+        run: |-
+          cat > infraestructure/terraform/pipeline.auto.tfvars <<EOF
+          aws_access_key             = "$AWS_ACCESS_KEY_ID"
+          aws_secret_key             = "$AWS_SECRET_ACCESS_KEY"
+          consul_token               = "$CONSUL_HTTP_TOKEN"
+          consul_address             = "consul.smu-labs.cl"
+          consul_project_path        = "comercial/infrastructure/fargate/be_portal_promocional/${{ env.ENV }}"
+          consul_infra_path          = "comercial/infrastructure/fargate/promociones/${{ env.ENV }}"
+          consul_base_path           = "comercial"
+          container_definition_image = "$IMAGE_NAME"
+          repository_name            = "$REPOSITORY_NAME"
+          ENVIRONMENT                = "${{ env.ENV }}"
+          EOF
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID_COMERCIAL }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY_COMERCIAL }}
+          CONSUL_HTTP_TOKEN: ${{ secrets.CONSUL_HTTP_TOKEN }}
+          IMAGE_NAME: ${{ secrets.AWS_ECR_REGISTRY_COMERCIAL }}/${{ github.repository }}:${{ env.DOCKER_IMAGE }}
+          REPOSITORY_NAME: ${{ github.repository }}
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          # terraform_version: 1.0.6
+          cli_config_credentials_token: ${{ secrets.TERRAFORM_API }}
+
+      - name: Terraform Format
+        id: fmt
+        timeout-minutes: 3
+        run: terraform -chdir=infraestructure/terraform fmt -check
+        env:
+          TF_WORKSPACE: ${{ env.ENV }}
+
+      - name: Terraform Init
+        id: init
+        timeout-minutes: 3
+        run: terraform -chdir=infraestructure/terraform init
+        env:
+          TF_WORKSPACE: ${{ env.ENV }}
+
+      - name: Terraform Validate
+        id: validate
+        timeout-minutes: 3
+        run: terraform -chdir=infraestructure/terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        timeout-minutes: 3
+        if: github.event_name == 'pull_request'
+        run: terraform -chdir=infraestructure/terraform plan -no-color
+        continue-on-error: true
+        env:
+          TF_WORKSPACE: ${{ env.ENV }}
+
+      - uses: actions/github-script@0.9.0
+        if: github.event_name == 'pull_request'
+        timeout-minutes: 3
+        env:
+          PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Validation 🤖\`${{ steps.validate.outputs.stdout }}\`
+            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+            <details><summary>Show Plan</summary>
+            \`\`\`\n
+            ${process.env.PLAN}
+            \`\`\`
+            </details>
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+            github.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Terraform Apply
+        timeout-minutes: 15
+        if: (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop') && github.event_name == 'push'
+        run: terraform -chdir=infraestructure/terraform apply
+        env:
+          TF_WORKSPACE: ${{ env.ENV }}
